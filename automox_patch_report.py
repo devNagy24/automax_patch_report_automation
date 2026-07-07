@@ -232,6 +232,136 @@ def filtered_packages(rows: list[dict[str, Any]], excluded_names: list[str]) -> 
     return kept
 
 
+def expand_prepatch_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    expanded: list[dict[str, Any]] = []
+    for row in rows:
+        container = row.get("prepatch") if isinstance(row.get("prepatch"), dict) else row
+        devices = container.get("devices") if isinstance(container, dict) else None
+        if not isinstance(devices, list):
+            expanded.append(row)
+            continue
+        for device in devices:
+            if not isinstance(device, dict):
+                continue
+            patches = device.get("patches")
+            if not isinstance(patches, list) or not patches:
+                expanded.append(
+                    {
+                        "device_id": device.get("id"),
+                        "device_name": device.get("name"),
+                        "device_group": device.get("group"),
+                        "connected": device.get("connected"),
+                        "needs_reboot": device.get("needsReboot"),
+                        "os_family": device.get("os_family"),
+                        "compliant": device.get("compliant"),
+                    }
+                )
+                continue
+            for patch in patches:
+                if not isinstance(patch, dict):
+                    continue
+                expanded.append(
+                    {
+                        "device_id": device.get("id"),
+                        "device_name": device.get("name"),
+                        "device_group": device.get("group"),
+                        "connected": device.get("connected"),
+                        "needs_reboot": device.get("needsReboot"),
+                        "os_family": device.get("os_family"),
+                        "compliant": device.get("compliant"),
+                        "package_id": patch.get("id"),
+                        "package_version_id": patch.get("packageVersionId"),
+                        "package_name": patch.get("name"),
+                        "severity": patch.get("severity"),
+                        "cve": patch.get("cve"),
+                        "create_time": patch.get("createTime"),
+                        "patch_time": patch.get("patchTime"),
+                        "needs_approval": patch.get("needsApproval"),
+                    }
+                )
+    return expanded
+
+
+def expand_needs_attention_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    expanded: list[dict[str, Any]] = []
+    for row in rows:
+        container = row.get("nonCompliant") if isinstance(row.get("nonCompliant"), dict) else row
+        devices = container.get("devices") if isinstance(container, dict) else None
+        if not isinstance(devices, list):
+            expanded.append(row)
+            continue
+        for device in devices:
+            if not isinstance(device, dict):
+                continue
+            policies = device.get("policies")
+            if not isinstance(policies, list) or not policies:
+                expanded.append(
+                    {
+                        "device_id": device.get("id"),
+                        "device_name": device.get("name"),
+                        "connected": device.get("connected"),
+                        "needs_reboot": device.get("needsReboot"),
+                        "group_id": device.get("groupId"),
+                        "os_family": device.get("os_family"),
+                        "compliant": device.get("compliant"),
+                        "disconnected_thirty_days": device.get("disconnectedThirtyDays"),
+                    }
+                )
+                continue
+            for policy in policies:
+                if not isinstance(policy, dict):
+                    continue
+                packages = policy.get("packages")
+                if not isinstance(packages, list) or not packages:
+                    expanded.append(
+                        {
+                            "device_id": device.get("id"),
+                            "device_name": device.get("name"),
+                            "connected": device.get("connected"),
+                            "needs_reboot": device.get("needsReboot"),
+                            "group_id": device.get("groupId"),
+                            "os_family": device.get("os_family"),
+                            "compliant": device.get("compliant"),
+                            "policy_id": policy.get("id"),
+                            "policy_name": policy.get("name"),
+                            "policy_type": policy.get("type"),
+                            "reason_for_fail": policy.get("reasonForFail"),
+                        }
+                    )
+                    continue
+                for package in packages:
+                    if not isinstance(package, dict):
+                        continue
+                    expanded.append(
+                        {
+                            "device_id": device.get("id"),
+                            "device_name": device.get("name"),
+                            "connected": device.get("connected"),
+                            "needs_reboot": device.get("needsReboot"),
+                            "group_id": device.get("groupId"),
+                            "os_family": device.get("os_family"),
+                            "compliant": device.get("compliant"),
+                            "policy_id": policy.get("id"),
+                            "policy_name": policy.get("name"),
+                            "policy_type": policy.get("type"),
+                            "reason_for_fail": policy.get("reasonForFail"),
+                            "package_id": package.get("id"),
+                            "package_version_id": package.get("packageVersionId"),
+                            "package_name": package.get("name"),
+                            "severity": package.get("severity"),
+                            "create_time": package.get("createTime"),
+                        }
+                    )
+    return expanded
+
+
+def as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def summarize(
     org: dict[str, Any],
     devices: list[dict[str, Any]],
@@ -242,9 +372,12 @@ def summarize(
     needs_attention: list[dict[str, Any]],
     target_mttp_days: int,
 ) -> dict[str, Any]:
-    status_values = [first_value(row, ("result_status", "status", "status_name")).lower() for row in policy_runs]
-    successes = sum(1 for value in status_values if "success" in value)
-    failures = sum(1 for value in status_values if "fail" in value or "error" in value)
+    successes = sum(as_int(row.get("success")) for row in policy_runs)
+    failures = sum(as_int(row.get("failed")) for row in policy_runs)
+    if not successes and not failures:
+        status_values = [first_value(row, ("result_status", "status", "status_name")).lower() for row in policy_runs]
+        successes = sum(1 for value in status_values if "success" in value)
+        failures = sum(1 for value in status_values if "fail" in value or "error" in value)
     total_policy_runs = successes + failures or len(policy_runs)
 
     mttp_samples: list[float] = []
@@ -267,7 +400,7 @@ def summarize(
         "policy_runs": len(policy_runs),
         "policy_success_rate": round((successes / total_policy_runs) * 100, 2) if total_policy_runs else None,
         "outstanding_patch_instances": len(outstanding_packages),
-        "needs_attention_devices": len(needs_attention),
+        "needs_attention_devices": len({first_value(row, ("device_id", "device_name", "name")) for row in needs_attention}),
         "mttp_days": mttp,
         "target_mttp_days": target_mttp_days,
         "mttp_samples": len(mttp_samples),
@@ -277,9 +410,22 @@ def summarize(
 def top_counts(rows: list[dict[str, Any]], keys: tuple[str, ...], limit: int = 10) -> list[tuple[str, int]]:
     counter: Counter[str] = Counter()
     for row in rows:
-        value = first_value(row, keys, "Unknown")
+        value = first_value(row, keys, "Unknown").strip()
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1]
         counter[value] += 1
     return counter.most_common(limit)
+
+
+def policy_result_counts(rows: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    totals = {
+        "SUCCESS": sum(as_int(row.get("success")) for row in rows),
+        "FAIL": sum(as_int(row.get("failed")) for row in rows),
+        "PENDING": sum(as_int(row.get("pending")) for row in rows),
+        "NOT INCLUDED": sum(as_int(row.get("not_included")) for row in rows),
+        "NOT APPLICABLE": sum(as_int(row.get("remediation_not_applicable")) for row in rows),
+    }
+    return [(key, value) for key, value in totals.items() if value]
 
 
 def html_table(rows: list[tuple[str, int]], first_header: str) -> str:
@@ -390,7 +536,10 @@ def main() -> int:
     )
     outstanding = client.offset_all("/reports/prepatch", {"o": org_id}, limit=250)
     needs_attention = client.offset_all("/reports/needs-attention", {"o": org_id}, limit=250)
+    outstanding = expand_prepatch_rows(outstanding)
+    needs_attention = expand_needs_attention_rows(needs_attention)
     outstanding = filtered_packages(outstanding, excluded_names)
+    needs_attention = filtered_packages(needs_attention, excluded_names)
 
     write_csv(out / "devices.csv", devices)
     write_csv(out / "patch_events_applied.csv", applied_events)
@@ -405,10 +554,10 @@ def main() -> int:
         out / "report.html",
         summary,
         {
-            "Top Applied Packages": top_counts(applied_events, ("package_name", "package", "display_name", "name")),
+            "Top Applied Packages": top_counts(applied_events, ("data.patches", "package_name", "package", "display_name", "name")),
             "Top Outstanding Packages": top_counts(outstanding, ("package_name", "display_name", "name")),
-            "Devices With Outstanding Patches": top_counts(outstanding, ("server_name", "device_name", "hostname", "name")),
-            "Policy Execution Results": top_counts(policy_runs, ("result_status", "status", "status_name")),
+            "Devices With Outstanding Patches": top_counts(outstanding, ("device_name", "server_name", "hostname", "name")),
+            "Policy Execution Results": policy_result_counts(policy_runs),
         },
         end,
     )
