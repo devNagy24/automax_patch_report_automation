@@ -37,7 +37,7 @@ Outputs are written to a timestamped folder under `reports`.
 ## Validate Without Calling Automox
 
 ```powershell
-python .\automox_patch_report.py --config .\config.json --dry-run
+py .\automox_patch_report.py --config .\config.json --dry-run
 ```
 
 ## Schedule Daily On Windows

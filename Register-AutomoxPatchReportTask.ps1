@@ -5,7 +5,7 @@ param(
     [string]$ConfigPath = "$PSScriptRoot\config.json",
     [string]$OutputRoot = "$PSScriptRoot\reports",
     [int]$Days = 30,
-    [string]$PythonPath = "python"
+    [string]$PythonPath = "py"
 )
 
 $ErrorActionPreference = "Stop"
