@@ -362,6 +362,78 @@ def as_int(value: Any) -> int:
         return 0
 
 
+def package_matches(name: str, wanted_names: list[str]) -> bool:
+    if not wanted_names:
+        return True
+    lowered = name.lower()
+    return any(wanted.lower() in lowered for wanted in wanted_names if wanted)
+
+
+def normalize_software_inventory(
+    rows: list[dict[str, Any]],
+    devices: list[dict[str, Any]],
+    wanted_names: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    device_lookup = {
+        str(device.get("id")): device
+        for device in devices
+        if device.get("id") not in (None, "")
+    }
+    normalized: list[dict[str, Any]] = []
+    wanted_names = wanted_names or []
+
+    for row in rows:
+        package_name = first_value(row, ("display_name", "name", "package_name", "software_name"))
+        if not package_matches(package_name, wanted_names):
+            continue
+
+        device_id = first_value(row, ("server_id", "device_id", "serverId", "deviceId"))
+        device = device_lookup.get(str(device_id), {})
+        device_name = (
+            first_value(row, ("server_name", "device_name", "hostname", "systemname"))
+            or first_value(device, ("display_name", "name", "hostname"))
+        )
+
+        normalized.append(
+            {
+                "software_name": package_name,
+                "version": first_value(row, ("version", "package_version", "display_version")),
+                "device_id": device_id,
+                "device_name": device_name,
+                "device_group_id": first_value(device, ("server_group_id", "group_id")),
+                "os_family": first_value(row, ("os_family", "osFamily")) or first_value(device, ("os_family",)),
+                "os_name": first_value(row, ("os_name", "osName")) or first_value(device, ("os_name",)),
+                "installed": first_value(row, ("installed",)),
+                "install_date": first_value(row, ("install_date", "installed_at", "installed_time", "create_time", "createTime")),
+                "package_id": first_value(row, ("id", "package_id", "packageId")),
+                "package_version_id": first_value(row, ("package_version_id", "packageVersionId")),
+                "software_id": first_value(row, ("software_id", "softwareId")),
+                "repo": first_value(row, ("repo", "repository")),
+                "severity": first_value(row, ("severity",)),
+                "cves": first_value(row, ("cves", "cve")),
+            }
+        )
+    return normalized
+
+
+def software_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], set[str]] = {}
+    for row in rows:
+        key = (row.get("software_name") or "Unknown", row.get("version") or "Unknown")
+        device_key = str(row.get("device_id") or row.get("device_name") or "")
+        grouped.setdefault(key, set()).add(device_key)
+
+    summary_rows = [
+        {
+            "software_name": software_name,
+            "version": version,
+            "install_count": len(devices),
+        }
+        for (software_name, version), devices in grouped.items()
+    ]
+    return sorted(summary_rows, key=lambda item: (-as_int(item["install_count"]), item["software_name"].lower(), item["version"].lower()))
+
+
 def summarize(
     org: dict[str, Any],
     devices: list[dict[str, Any]],
@@ -370,6 +442,7 @@ def summarize(
     policy_runs: list[dict[str, Any]],
     outstanding_packages: list[dict[str, Any]],
     needs_attention: list[dict[str, Any]],
+    software_inventory: list[dict[str, Any]],
     target_mttp_days: int,
 ) -> dict[str, Any]:
     successes = sum(as_int(row.get("success")) for row in policy_runs)
@@ -401,6 +474,8 @@ def summarize(
         "policy_success_rate": round((successes / total_policy_runs) * 100, 2) if total_policy_runs else None,
         "outstanding_patch_instances": len(outstanding_packages),
         "needs_attention_devices": len({first_value(row, ("device_id", "device_name", "name")) for row in needs_attention}),
+        "software_inventory_installs": len(software_inventory),
+        "unique_software_titles": len({(row.get("software_name") or "").lower() for row in software_inventory if row.get("software_name")}),
         "mttp_days": mttp,
         "target_mttp_days": target_mttp_days,
         "mttp_samples": len(mttp_samples),
@@ -428,6 +503,17 @@ def policy_result_counts(rows: list[dict[str, Any]]) -> list[tuple[str, int]]:
     return [(key, value) for key, value in totals.items() if value]
 
 
+def summary_top_counts(rows: list[dict[str, Any]], name_key: str, count_key: str, limit: int = 10) -> list[tuple[str, int]]:
+    counts: list[tuple[str, int]] = []
+    for row in rows[:limit]:
+        label = str(row.get(name_key) or "Unknown")
+        version = str(row.get("version") or "")
+        if version and version.lower() != "unknown":
+            label = f"{label} ({version})"
+        counts.append((label, as_int(row.get(count_key))))
+    return counts
+
+
 def html_table(rows: list[tuple[str, int]], first_header: str) -> str:
     body = "\n".join(
         f"<tr><td>{html.escape(name)}</td><td>{count}</td></tr>"
@@ -445,6 +531,7 @@ def write_html(path: Path, summary: dict[str, Any], top_tables: dict[str, list[t
     tables = "\n".join(
         f"<section><h2>{html.escape(title)}</h2>{html_table(rows, title)}</section>"
         for title, rows in top_tables.items()
+        if rows
     )
     document = f"""<!doctype html>
 <html lang="en">
@@ -490,6 +577,7 @@ def main() -> int:
     parser.add_argument("--days", type=int, default=30, help="Lookback window in days.")
     parser.add_argument("--output-dir", type=Path, default=Path("automox-report-output"), help="Output directory.")
     parser.add_argument("--dry-run", action="store_true", help="Validate config and show planned endpoints without calling Automox.")
+    parser.add_argument("--skip-software-inventory", action="store_true", help="Skip installed software inventory collection.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -499,6 +587,7 @@ def main() -> int:
     target_mttp_days = int(config.get("target_mttp_days", 7))
     excluded_names = list(config.get("excluded_package_names", []))
     excluded_group_names = list(config.get("excluded_group_names", []))
+    tracked_software_names = list(config.get("tracked_software_names", []))
 
     end = utc_now()
     start = end - dt.timedelta(days=args.days)
@@ -509,7 +598,7 @@ def main() -> int:
         print(f"Account UUID configured: {'yes' if account_uuid else 'no'}")
         print(f"Org ID configured: {'yes' if get_setting(config, 'org_id') else 'no'}")
         print(f"Org UUID configured: {'yes' if get_setting(config, 'org_uuid') else 'no'}")
-        print("Endpoints: /orgs, /servers, /events, /policy-history/policy-runs, /reports/prepatch, /reports/needs-attention")
+        print("Endpoints: /orgs, /servers, /events, /policy-history/policy-runs, /reports/prepatch, /reports/needs-attention, /orgs/{orgID}/packages")
         return 0
 
     client = AutomoxClient(api_key, base_url)
@@ -540,6 +629,21 @@ def main() -> int:
     needs_attention = expand_needs_attention_rows(needs_attention)
     outstanding = filtered_packages(outstanding, excluded_names)
     needs_attention = filtered_packages(needs_attention, excluded_names)
+    installed_packages = []
+    software_inventory: list[dict[str, Any]] = []
+    tracked_software_inventory: list[dict[str, Any]] = []
+    if not args.skip_software_inventory:
+        installed_packages = client.page_all(
+            f"/orgs/{org_id}/packages",
+            {"awaiting": 0, "includeUnmanaged": 1},
+            limit=500,
+        )
+        software_inventory = normalize_software_inventory(installed_packages, devices)
+        if tracked_software_names:
+            tracked_software_inventory = normalize_software_inventory(installed_packages, devices, tracked_software_names)
+
+    software_summary_rows = software_summary(software_inventory)
+    tracked_software_summary_rows = software_summary(tracked_software_inventory)
 
     write_csv(out / "devices.csv", devices)
     write_csv(out / "patch_events_applied.csv", applied_events)
@@ -547,20 +651,23 @@ def main() -> int:
     write_csv(out / "policy_runs.csv", policy_runs)
     write_csv(out / "outstanding_packages.csv", outstanding)
     write_csv(out / "needs_attention.csv", needs_attention)
+    write_csv(out / "software_inventory.csv", software_inventory)
+    write_csv(out / "software_inventory_summary.csv", software_summary_rows)
+    write_csv(out / "tracked_software_inventory.csv", tracked_software_inventory)
+    write_csv(out / "tracked_software_summary.csv", tracked_software_summary_rows)
 
-    summary = summarize(org, devices, applied_events, failed_events, policy_runs, outstanding, needs_attention, target_mttp_days)
+    summary = summarize(org, devices, applied_events, failed_events, policy_runs, outstanding, needs_attention, software_inventory, target_mttp_days)
     write_csv(out / "summary.csv", [summary])
-    write_html(
-        out / "report.html",
-        summary,
-        {
-            "Top Applied Packages": top_counts(applied_events, ("data.patches", "package_name", "package", "display_name", "name")),
-            "Top Outstanding Packages": top_counts(outstanding, ("package_name", "display_name", "name")),
-            "Devices With Outstanding Patches": top_counts(outstanding, ("device_name", "server_name", "hostname", "name")),
-            "Policy Execution Results": policy_result_counts(policy_runs),
-        },
-        end,
-    )
+    top_tables = {
+        "Top Applied Packages": top_counts(applied_events, ("data.patches", "package_name", "package", "display_name", "name")),
+        "Top Outstanding Packages": top_counts(outstanding, ("package_name", "display_name", "name")),
+        "Devices With Outstanding Patches": top_counts(outstanding, ("device_name", "server_name", "hostname", "name")),
+        "Policy Execution Results": policy_result_counts(policy_runs),
+        "Top Installed Software": summary_top_counts(software_summary_rows, "software_name", "install_count"),
+    }
+    if tracked_software_summary_rows:
+        top_tables["Tracked Software Installs"] = summary_top_counts(tracked_software_summary_rows, "software_name", "install_count")
+    write_html(out / "report.html", summary, top_tables, end)
     print(f"Wrote Automox report outputs to {out}")
     return 0
 

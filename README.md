@@ -11,6 +11,7 @@ This pack creates a read-only Automox patch report similar to the supplied "Patc
 - Policy execution history: `/policy-history/policy-runs`.
 - Outstanding patch posture: `/reports/prepatch`.
 - Needs-attention devices: `/reports/needs-attention`.
+- Installed software inventory: `/orgs/{orgID}/packages?awaiting=0&includeUnmanaged=1`.
 
 The Automox Console API spec used here is version `2026-06-19` from `https://console.automox.com/api/docs/specs/console-api.json`. The Cloud Worklets docs use organization-scoped bearer auth under `https://console.automox.com/api/organizations/{orgUuid}`; this report uses the Console API because the PDF is report/policy/package data, not a Cloud Worklet execution.
 
@@ -33,6 +34,17 @@ Open a new PowerShell window after setting the variable.
 ```
 
 Outputs are written to a timestamped folder under `reports`.
+
+Key software inventory outputs:
+
+- `software_inventory.csv`: one row per installed software package/device instance.
+- `software_inventory_summary.csv`: install counts grouped by software and version.
+- `tracked_software_inventory.csv`: optional drilldown rows for software names in `tracked_software_names`.
+- `tracked_software_summary.csv`: optional counts for tracked software grouped by software and version.
+
+Use `software_inventory_summary.csv` to answer install-count questions for any software title in the environment. Use `software_inventory.csv` for the host-level drilldown, including device name, version, OS metadata, and install/date fields when Automox provides them.
+
+`tracked_software_names` is optional. Leave it empty to report the full software inventory only, or add specific names when you want an extra filtered CSV/table. Matching is case-insensitive and partial.
 
 ## Validate Without Calling Automox
 

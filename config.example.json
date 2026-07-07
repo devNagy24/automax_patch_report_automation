@@ -5,6 +5,7 @@
   "org_uuid": null,
   "org_name": null,
   "target_mttp_days": 7,
+  "tracked_software_names": [],
   "excluded_group_names": [
     "tablets"
   ],
