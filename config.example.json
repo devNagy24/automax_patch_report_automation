@@ -1,0 +1,26 @@
+{
+  "base_url": "https://console.automox.com/api",
+  "account_uuid": "YOUR_ACCOUNT_UUID",
+  "org_id": null,
+  "org_uuid": null,
+  "org_name": null,
+  "target_mttp_days": 7,
+  "excluded_group_names": [
+    "tablets"
+  ],
+  "excluded_package_names": [
+    "azure connected machine agent",
+    "azure data studio",
+    "brave",
+    "dell command update",
+    "dell display manager",
+    "displaylink graphics",
+    "logi options plus",
+    "logitech unifying software",
+    "microsoft 365 - es-es",
+    "microsoft 365 - fr-fr",
+    "microsoft 365 - pt-br",
+    "powertoys",
+    "windows 11 insider preview feature update"
+  ]
+}

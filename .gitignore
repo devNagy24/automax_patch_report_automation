@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# VS Code
+.vscode/
+
+# Secrets
+config.json
+.env
+
+# Windows
+Thumbs.db
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
