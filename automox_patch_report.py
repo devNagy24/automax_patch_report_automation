@@ -523,6 +523,7 @@ def html_table(rows: list[tuple[str, int]], first_header: str) -> str:
 
 
 def write_html(path: Path, summary: dict[str, Any], top_tables: dict[str, list[tuple[str, int]]], generated_at: dt.datetime) -> None:
+    generated_display = generated_at.strftime("%Y-%m-%d %H:%M:%S UTC")
     cards = "\n".join(
         f"<section class='card'><span>{html.escape(key.replace('_', ' ').title())}</span><strong>{html.escape(str(value if value is not None else 'n/a'))}</strong></section>"
         for key, value in summary.items()
@@ -559,7 +560,7 @@ def write_html(path: Path, summary: dict[str, Any], top_tables: dict[str, list[t
 <body>
   <header>
     <h1>Automox Patch Impact Report</h1>
-    <p>{html.escape(str(summary.get('organization', '')))} - generated {html.escape(generated_at.isoformat())}</p>
+    <p>{html.escape(str(summary.get('organization', '')))} - generated {html.escape(generated_display)}</p>
   </header>
   <main>
     <div class="grid">{cards}</div>
