@@ -65,4 +65,4 @@ The scheduled task relies on the `AUTOMOX_API_KEY` user environment variable. It
 - The supplied Agent Access Key is not used for reporting. Agent access keys are for device/agent enrollment workflows.
 - Exact MTTP is only calculated when the API payload includes both install time and a comparable release/available/create timestamp for the patch. Otherwise the HTML shows `n/a` and still includes the raw CSVs needed to refine the calculation.
 - The package exclusion list is seeded from the PDF filters and can be edited in `config.json`.
-- Because an API key was pasted into chat, rotate it in Automox before using this for production.
+
