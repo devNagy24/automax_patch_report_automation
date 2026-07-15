@@ -552,7 +552,10 @@ def scan_service_inventory(
     matches: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
 
-    for device in devices:
+    total = len(devices)
+    for index, device in enumerate(devices, start=1):
+        if index == 1 or index % 25 == 0 or index == total:
+            print(f"Scanning service inventory {index}/{total} devices...", flush=True)
         device_uuid = device.get("uuid")
         if not device_uuid:
             continue
@@ -560,12 +563,18 @@ def scan_service_inventory(
             payload = client.get(f"/device-details/orgs/{org_uuid}/devices/{device_uuid}/inventory", {"category": "Services"})
             service_rows = extract_service_rows(payload, device)
         except Exception as exc:
+            message = str(exc)
+            error_type = "api_error"
+            if "not found in organization" in message.lower():
+                error_type = "inventory_unavailable"
+                message = "Device was returned by /servers, but Services inventory is not available for this device UUID."
             errors.append(
                 {
                     "device_id": device.get("id"),
                     "device_uuid": device_uuid,
                     "device_name": device.get("name") or device.get("display_name"),
-                    "error": str(exc),
+                    "error_type": error_type,
+                    "error": message,
                 }
             )
             continue
@@ -771,8 +780,11 @@ def main() -> int:
     out = args.output_dir / end.strftime("%Y-%m-%d_%H%M%SZ")
     out.mkdir(parents=True, exist_ok=True)
 
+    print("Fetching device inventory...", flush=True)
     devices = client.page_all("/servers", {"o": org_id, "include_details": 1, "include_next_patch_time": 1}, limit=500)
     devices = filter_devices(devices, excluded_group_names)
+    print(f"Fetched {len(devices)} devices.", flush=True)
+    print("Fetching patch event history...", flush=True)
     applied_events = client.page_all(
         "/events",
         {"o": org_id, "eventName": "system.patch.applied", "startDate": start.date().isoformat(), "endDate": end.date().isoformat()},
@@ -783,11 +795,13 @@ def main() -> int:
         {"o": org_id, "eventName": "system.patch.failed", "startDate": start.date().isoformat(), "endDate": end.date().isoformat()},
         limit=500,
     )
+    print("Fetching policy run history...", flush=True)
     policy_runs = client.page_all(
         "/policy-history/policy-runs",
         {"org": org_uuid, "start_time": start.isoformat().replace("+00:00", "Z"), "end_time": end.isoformat().replace("+00:00", "Z")},
         limit=5000,
     )
+    print("Fetching outstanding patch and needs-attention reports...", flush=True)
     outstanding = client.offset_all("/reports/prepatch", {"o": org_id}, limit=250)
     needs_attention = client.offset_all("/reports/needs-attention", {"o": org_id}, limit=250)
     outstanding = expand_prepatch_rows(outstanding)
@@ -798,6 +812,7 @@ def main() -> int:
     software_inventory: list[dict[str, Any]] = []
     tracked_software_inventory: list[dict[str, Any]] = []
     if not args.skip_software_inventory:
+        print("Fetching installed software inventory...", flush=True)
         installed_packages = client.page_all(
             f"/orgs/{org_id}/packages",
             {"awaiting": 0, "includeUnmanaged": 1},
@@ -812,8 +827,10 @@ def main() -> int:
     service_matches: list[dict[str, Any]] = []
     service_errors: list[dict[str, Any]] = []
     if service_search_terms and not args.skip_service_inventory:
+        print(f"Searching service inventory for: {', '.join(service_search_terms)}", flush=True)
         service_matches, service_errors = scan_service_inventory(client, org_uuid, devices, service_search_terms, service_running_only)
 
+    print("Writing report files...", flush=True)
     write_csv(out / "devices.csv", devices)
     write_csv(out / "patch_events_applied.csv", applied_events)
     write_csv(out / "patch_events_failed.csv", failed_events)
