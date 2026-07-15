@@ -163,6 +163,15 @@ class AutomoxClient:
             offset += limit
 
 
+def clean_field_name(value: str) -> str:
+    name = value.lower().strip().replace("-", "_").replace(" ", "_")
+    while "__" in name:
+        name = name.replace("__", "_")
+    if name.startswith("services_"):
+        name = name[len("services_") :]
+    return name
+
+
 def resolve_org(client: AutomoxClient, config: dict[str, Any]) -> tuple[int, str, dict[str, Any]]:
     org_id = get_setting(config, "org_id")
     org_uuid = get_setting(config, "org_uuid")
@@ -434,6 +443,143 @@ def software_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(summary_rows, key=lambda item: (-as_int(item["install_count"]), item["software_name"].lower(), item["version"].lower()))
 
 
+def data_records_to_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
+    values = record.get("value")
+    if not isinstance(values, list):
+        return []
+
+    columns: list[tuple[str, list[Any]]] = []
+    max_len = 0
+    for field in values:
+        if not isinstance(field, dict):
+            continue
+        field_values = field.get("values")
+        if not isinstance(field_values, list):
+            continue
+        name = clean_field_name(str(field.get("name") or field.get("friendly_name") or "value"))
+        columns.append((name, field_values))
+        max_len = max(max_len, len(field_values))
+
+    rows: list[dict[str, Any]] = []
+    for index in range(max_len):
+        row: dict[str, Any] = {
+            "inventory_name": record.get("name"),
+            "inventory_friendly_name": record.get("friendly_name"),
+            "inventory_collected_at": record.get("collected_at"),
+        }
+        for name, field_values in columns:
+            row[name] = field_values[index] if index < len(field_values) else ""
+        rows.append(row)
+    return rows
+
+
+def extract_service_rows(payload: Any, device: dict[str, Any]) -> list[dict[str, Any]]:
+    if isinstance(payload, list) and payload:
+        payload = payload[0]
+    if not isinstance(payload, dict):
+        return []
+
+    categories = payload.get("categories") or payload.get("Categories") or {}
+    services = categories.get("Services") or categories.get("services") or {}
+    sub_categories = services.get("sub_categories") or services.get("sub-categories") or {}
+    rows: list[dict[str, Any]] = []
+
+    for sub_category_name, sub_category in sub_categories.items():
+        if not isinstance(sub_category, dict):
+            continue
+        data = sub_category.get("data")
+        if not isinstance(data, list):
+            continue
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "data_records":
+                item_rows = data_records_to_rows(item)
+            else:
+                item_rows = [
+                    {
+                        "inventory_name": item.get("name"),
+                        "inventory_friendly_name": item.get("friendly_name"),
+                        "inventory_collected_at": item.get("collected_at"),
+                        clean_field_name(str(item.get("name") or "value")): item.get("value"),
+                    }
+                ]
+            for row in item_rows:
+                row.update(
+                    {
+                        "device_id": device.get("id"),
+                        "device_uuid": device.get("uuid"),
+                        "device_name": device.get("name") or device.get("display_name"),
+                        "device_group_id": device.get("server_group_id"),
+                        "os_family": device.get("os_family"),
+                        "os_name": device.get("os_name"),
+                        "connected": device.get("connected"),
+                        "service_sub_category": sub_category_name,
+                    }
+                )
+                rows.append(row)
+    return rows
+
+
+def row_matches_terms(row: dict[str, Any], terms: list[str]) -> bool:
+    if not terms:
+        return True
+    haystack = " ".join(str(value) for value in row.values() if value is not None).lower()
+    return any(term.lower() in haystack for term in terms if term)
+
+
+def service_is_running(row: dict[str, Any]) -> bool:
+    status_keys = ("state", "status", "running", "started")
+    for key, value in row.items():
+        lower_key = key.lower()
+        if not any(token in lower_key for token in status_keys):
+            continue
+        lower_value = str(value).strip().lower()
+        if lower_value in {"running", "started", "true", "1", "active"}:
+            return True
+        if lower_value in {"stopped", "stop pending", "false", "0", "inactive", "disabled"}:
+            return False
+    return False
+
+
+def scan_service_inventory(
+    client: AutomoxClient,
+    org_uuid: str,
+    devices: list[dict[str, Any]],
+    search_terms: list[str],
+    running_only: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    matches: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    for device in devices:
+        device_uuid = device.get("uuid")
+        if not device_uuid:
+            continue
+        try:
+            payload = client.get(f"/device-details/orgs/{org_uuid}/devices/{device_uuid}/inventory", {"category": "Services"})
+            service_rows = extract_service_rows(payload, device)
+        except Exception as exc:
+            errors.append(
+                {
+                    "device_id": device.get("id"),
+                    "device_uuid": device_uuid,
+                    "device_name": device.get("name") or device.get("display_name"),
+                    "error": str(exc),
+                }
+            )
+            continue
+
+        for row in service_rows:
+            if not row_matches_terms(row, search_terms):
+                continue
+            if running_only and not service_is_running(row):
+                continue
+            row["matched_terms"] = ", ".join(term for term in search_terms if term.lower() in " ".join(str(value) for value in row.values()).lower())
+            matches.append(row)
+    return matches, errors
+
+
 def summarize(
     org: dict[str, Any],
     devices: list[dict[str, Any]],
@@ -443,6 +589,7 @@ def summarize(
     outstanding_packages: list[dict[str, Any]],
     needs_attention: list[dict[str, Any]],
     software_inventory: list[dict[str, Any]],
+    service_matches: list[dict[str, Any]],
     target_mttp_days: int,
 ) -> dict[str, Any]:
     successes = sum(as_int(row.get("success")) for row in policy_runs)
@@ -476,6 +623,8 @@ def summarize(
         "needs_attention_devices": len({first_value(row, ("device_id", "device_name", "name")) for row in needs_attention}),
         "software_inventory_installs": len(software_inventory),
         "unique_software_titles": len({(row.get("software_name") or "").lower() for row in software_inventory if row.get("software_name")}),
+        "service_inventory_matches": len(service_matches),
+        "service_match_devices": len({first_value(row, ("device_uuid", "device_id", "device_name")) for row in service_matches}),
         "mttp_days": mttp,
         "target_mttp_days": target_mttp_days,
         "mttp_samples": len(mttp_samples),
@@ -512,6 +661,14 @@ def summary_top_counts(rows: list[dict[str, Any]], name_key: str, count_key: str
             label = f"{label} ({version})"
         counts.append((label, as_int(row.get(count_key))))
     return counts
+
+
+def service_device_counts(rows: list[dict[str, Any]], limit: int = 10) -> list[tuple[str, int]]:
+    return top_counts(rows, ("device_name", "device_id"), limit)
+
+
+def service_name_counts(rows: list[dict[str, Any]], limit: int = 10) -> list[tuple[str, int]]:
+    return top_counts(rows, ("display_name", "name", "service_name", "inventory_friendly_name"), limit)
 
 
 def html_table(rows: list[tuple[str, int]], first_header: str) -> str:
@@ -579,6 +736,7 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, default=Path("automox-report-output"), help="Output directory.")
     parser.add_argument("--dry-run", action="store_true", help="Validate config and show planned endpoints without calling Automox.")
     parser.add_argument("--skip-software-inventory", action="store_true", help="Skip installed software inventory collection.")
+    parser.add_argument("--skip-service-inventory", action="store_true", help="Skip service inventory search.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -589,6 +747,8 @@ def main() -> int:
     excluded_names = list(config.get("excluded_package_names", []))
     excluded_group_names = list(config.get("excluded_group_names", []))
     tracked_software_names = list(config.get("tracked_software_names", []))
+    service_search_terms = list(config.get("service_search_terms", []))
+    service_running_only = bool(config.get("service_running_only", True))
 
     end = utc_now()
     start = end - dt.timedelta(days=args.days)
@@ -600,6 +760,10 @@ def main() -> int:
         print(f"Org ID configured: {'yes' if get_setting(config, 'org_id') else 'no'}")
         print(f"Org UUID configured: {'yes' if get_setting(config, 'org_uuid') else 'no'}")
         print("Endpoints: /orgs, /servers, /events, /policy-history/policy-runs, /reports/prepatch, /reports/needs-attention, /orgs/{orgID}/packages")
+        if service_search_terms and not args.skip_service_inventory:
+            print("Service inventory search: enabled via /device-details/orgs/{orgUUID}/devices/{deviceUUID}/inventory?category=Services")
+        else:
+            print("Service inventory search: disabled until service_search_terms is configured")
         return 0
 
     client = AutomoxClient(api_key, base_url)
@@ -645,6 +809,10 @@ def main() -> int:
 
     software_summary_rows = software_summary(software_inventory)
     tracked_software_summary_rows = software_summary(tracked_software_inventory)
+    service_matches: list[dict[str, Any]] = []
+    service_errors: list[dict[str, Any]] = []
+    if service_search_terms and not args.skip_service_inventory:
+        service_matches, service_errors = scan_service_inventory(client, org_uuid, devices, service_search_terms, service_running_only)
 
     write_csv(out / "devices.csv", devices)
     write_csv(out / "patch_events_applied.csv", applied_events)
@@ -656,8 +824,10 @@ def main() -> int:
     write_csv(out / "software_inventory_summary.csv", software_summary_rows)
     write_csv(out / "tracked_software_inventory.csv", tracked_software_inventory)
     write_csv(out / "tracked_software_summary.csv", tracked_software_summary_rows)
+    write_csv(out / "service_inventory_matches.csv", service_matches)
+    write_csv(out / "service_inventory_errors.csv", service_errors)
 
-    summary = summarize(org, devices, applied_events, failed_events, policy_runs, outstanding, needs_attention, software_inventory, target_mttp_days)
+    summary = summarize(org, devices, applied_events, failed_events, policy_runs, outstanding, needs_attention, software_inventory, service_matches, target_mttp_days)
     write_csv(out / "summary.csv", [summary])
     top_tables = {
         "Top Applied Packages": top_counts(applied_events, ("data.patches", "package_name", "package", "display_name", "name")),
@@ -665,6 +835,8 @@ def main() -> int:
         "Devices With Outstanding Patches": top_counts(outstanding, ("device_name", "server_name", "hostname", "name")),
         "Policy Execution Results": policy_result_counts(policy_runs),
         "Top Installed Software": summary_top_counts(software_summary_rows, "software_name", "install_count"),
+        "Service Matches By Device": service_device_counts(service_matches),
+        "Service Matches By Name": service_name_counts(service_matches),
     }
     if tracked_software_summary_rows:
         top_tables["Tracked Software Installs"] = summary_top_counts(tracked_software_summary_rows, "software_name", "install_count")

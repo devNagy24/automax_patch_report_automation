@@ -6,6 +6,8 @@
   "org_name": null,
   "target_mttp_days": 7,
   "tracked_software_names": [],
+  "service_search_terms": [],
+  "service_running_only": true,
   "excluded_group_names": [
     "tablets"
   ],
