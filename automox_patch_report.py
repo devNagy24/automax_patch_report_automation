@@ -218,12 +218,13 @@ def filter_devices(rows: list[dict[str, Any]], excluded_group_names: list[str]) 
     return kept
 
 
-def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str] | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     flat_rows = [flatten(row) for row in rows]
-    fieldnames = sorted({key for row in flat_rows for key in row.keys()})
+    if fieldnames is None:
+        fieldnames = sorted({key for row in flat_rows for key in row.keys()})
     with path.open("w", newline="", encoding="utf-8-sig") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in flat_rows:
             writer.writerow(row)
@@ -362,6 +363,186 @@ def expand_needs_attention_rows(rows: list[dict[str, Any]]) -> list[dict[str, An
                         }
                     )
     return expanded
+
+
+def raw_value_at_path(row: dict[str, Any], path: str) -> Any:
+    value: Any = row
+    for part in path.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return None
+        value = value[part]
+    return value
+
+
+def first_raw_value(row: dict[str, Any], paths: tuple[str, ...]) -> Any:
+    for path in paths:
+        value = raw_value_at_path(row, path)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def list_value(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip():
+        text = value.strip()
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return [item.strip() for item in text.split(",") if item.strip()]
+        if isinstance(parsed, list):
+            return parsed
+        return [parsed]
+    return []
+
+
+def compact_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def console_bool(value: Any) -> str:
+    return "TRUE" if truthy(value) else "FALSE"
+
+
+def console_ip_addresses(device: dict[str, Any]) -> str:
+    existing = first_raw_value(device, ("ipAddress", "ip_address"))
+    existing_list = list_value(existing)
+    if existing_list and isinstance(existing_list[0], dict):
+        return compact_json(existing_list)
+
+    public_or_all = list_value(first_raw_value(device, ("ip_addrs", "ipAddresses", "ip_addresses")))
+    private = list_value(first_raw_value(device, ("ip_addrs_private", "privateIpAddresses", "private_ip_addresses")))
+    private_set = {str(ip) for ip in private}
+    ordered_ips = [str(ip) for ip in public_or_all] + [str(ip) for ip in private if str(ip) not in {str(item) for item in public_or_all}]
+
+    seen: set[str] = set()
+    rows = []
+    for ip in ordered_ips:
+        if not ip or ip in seen:
+            continue
+        seen.add(ip)
+        rows.append({"ip_address": ip, "ip_type": "private" if ip in private_set else "public"})
+    return compact_json(rows)
+
+
+def first_nic_ip(value: Any) -> str:
+    ips = list_value(value)
+    if ips:
+        return str(ips[0])
+    return str(value or "")
+
+
+def console_nics(device: dict[str, Any]) -> str:
+    nics = list_value(first_raw_value(device, ("detail.NICS", "details.NICS", "nics", "NICS")))
+    rows = []
+    for nic in nics:
+        if not isinstance(nic, dict):
+            continue
+        rows.append(
+            {
+                "name": str(nic.get("name") or nic.get("DEVICE") or nic.get("device") or ""),
+                "ip_address": first_nic_ip(nic.get("ip_address") or nic.get("IPS") or nic.get("ips")),
+                "mac": str(nic.get("mac") or nic.get("MAC") or ""),
+                "type": str(nic.get("type") or nic.get("TYPE") or ""),
+                "connected": truthy(nic.get("connected") if "connected" in nic else nic.get("CONNECTED")),
+            }
+        )
+    return compact_json(rows)
+
+
+def build_outstanding_patch_age_days(outstanding_packages: list[dict[str, Any]], as_of: dt.datetime) -> dict[str, int]:
+    ages: dict[str, int] = {}
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=dt.timezone.utc)
+    for row in outstanding_packages:
+        device_id = first_value(row, ("device_id", "server_id", "id"))
+        created_at = parse_iso(first_value(row, ("create_time", "createTime", "patch_create_time")))
+        if not device_id or not created_at:
+            continue
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=dt.timezone.utc)
+        days = max(0, int((as_of - created_at).total_seconds() // 86400))
+        previous = ages.get(str(device_id))
+        ages[str(device_id)] = days if previous is None else max(previous, days)
+    return ages
+
+
+def fetch_server_group_names(client: AutomoxClient, org_id: int) -> dict[str, str]:
+    try:
+        groups = client.page_all("/servergroups", {"o": org_id}, limit=500)
+    except Exception as exc:
+        print(f"Warning: unable to fetch server groups for device export: {exc}", flush=True)
+        return {}
+    names: dict[str, str] = {}
+    for group in groups:
+        group_id = first_value(group, ("id", "server_group_id", "serverGroupId"))
+        group_name = first_value(group, ("name", "server_group_name", "serverGroupName"))
+        if group_id and group_name:
+            names[str(group_id)] = group_name
+    return names
+
+
+DEVICE_CONSOLE_FIELDNAMES = [
+    "agentVersion",
+    "customName",
+    "id",
+    "ipAddress",
+    "lastLoggedInUser",
+    "lastUpdateTime",
+    "model",
+    "name",
+    "needsReboot",
+    "nics",
+    "organizationalUnit",
+    "osName",
+    "outstandingPatchAgeDays",
+    "serialNumber",
+    "serverGroupName",
+    "uuid",
+]
+
+
+def normalize_device_console_rows(
+    devices: list[dict[str, Any]],
+    server_group_names: dict[str, str],
+    outstanding_patch_age_days: dict[str, int],
+) -> list[dict[str, Any]]:
+    rows = []
+    for device in devices:
+        device_id = first_value(device, ("id",))
+        group_id = first_value(device, ("server_group_id", "serverGroupId", "group_id"))
+        rows.append(
+            {
+                "agentVersion": first_value(device, ("agent_version", "agentVersion")),
+                "customName": first_value(device, ("custom_name", "customName")),
+                "id": device_id,
+                "ipAddress": console_ip_addresses(device),
+                "lastLoggedInUser": first_value(device, ("last_logged_in_user", "lastLoggedInUser")),
+                "lastUpdateTime": first_value(device, ("last_update_time", "lastUpdateTime")),
+                "model": first_value(device, ("detail.MODEL", "details.MODEL", "model")),
+                "name": first_value(device, ("name", "display_name", "hostname")),
+                "needsReboot": console_bool(first_value(device, ("needs_reboot", "needsReboot"))),
+                "nics": console_nics(device),
+                "organizationalUnit": first_value(device, ("organizational_unit", "organizationalUnit")),
+                "osName": first_value(device, ("os_name", "osName")),
+                "outstandingPatchAgeDays": outstanding_patch_age_days.get(str(device_id), ""),
+                "serialNumber": first_value(device, ("serial_number", "serialNumber", "detail.SERIAL", "detail.SERVICETAG")),
+                "serverGroupName": server_group_names.get(str(group_id), first_value(device, ("server_group_name", "serverGroupName", "group_name"))),
+                "uuid": first_value(device, ("uuid",)),
+            }
+        )
+    return rows
 
 
 def as_int(value: Any) -> int:
@@ -768,7 +949,7 @@ def main() -> int:
         print(f"Account UUID configured: {'yes' if account_uuid else 'no'}")
         print(f"Org ID configured: {'yes' if get_setting(config, 'org_id') else 'no'}")
         print(f"Org UUID configured: {'yes' if get_setting(config, 'org_uuid') else 'no'}")
-        print("Endpoints: /orgs, /servers, /events, /policy-history/policy-runs, /reports/prepatch, /reports/needs-attention, /orgs/{orgID}/packages")
+        print("Endpoints: /orgs, /servers, /servergroups, /events, /policy-history/policy-runs, /reports/prepatch, /reports/needs-attention, /orgs/{orgID}/packages")
         if service_search_terms and not args.skip_service_inventory:
             print("Service inventory search: enabled via /device-details/orgs/{orgUUID}/devices/{deviceUUID}/inventory?category=Services")
         else:
@@ -784,6 +965,8 @@ def main() -> int:
     devices = client.page_all("/servers", {"o": org_id, "include_details": 1, "include_next_patch_time": 1}, limit=500)
     devices = filter_devices(devices, excluded_group_names)
     print(f"Fetched {len(devices)} devices.", flush=True)
+    print("Fetching server group names...", flush=True)
+    server_group_names = fetch_server_group_names(client, org_id)
     print("Fetching patch event history...", flush=True)
     applied_events = client.page_all(
         "/events",
@@ -808,6 +991,11 @@ def main() -> int:
     needs_attention = expand_needs_attention_rows(needs_attention)
     outstanding = filtered_packages(outstanding, excluded_names)
     needs_attention = filtered_packages(needs_attention, excluded_names)
+    device_console_rows = normalize_device_console_rows(
+        devices,
+        server_group_names,
+        build_outstanding_patch_age_days(outstanding, end),
+    )
     installed_packages = []
     software_inventory: list[dict[str, Any]] = []
     tracked_software_inventory: list[dict[str, Any]] = []
@@ -832,6 +1020,7 @@ def main() -> int:
 
     print("Writing report files...", flush=True)
     write_csv(out / "devices.csv", devices)
+    write_csv(out / "devices_console_columns.csv", device_console_rows, DEVICE_CONSOLE_FIELDNAMES)
     write_csv(out / "patch_events_applied.csv", applied_events)
     write_csv(out / "patch_events_failed.csv", failed_events)
     write_csv(out / "policy_runs.csv", policy_runs)

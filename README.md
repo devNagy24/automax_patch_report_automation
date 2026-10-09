@@ -36,6 +36,11 @@ Open a new PowerShell window after setting the variable.
 
 Outputs are written to a timestamped folder under `reports`.
 
+Key device outputs:
+
+- `devices.csv`: raw `/servers` device inventory flattened for troubleshooting.
+- `devices_console_columns.csv`: normalized device inventory with Automox Console-style columns, including `agentVersion`, `customName`, `ipAddress`, `lastLoggedInUser`, `lastUpdateTime`, `model`, `needsReboot`, `nics`, `organizationalUnit`, `osName`, `outstandingPatchAgeDays`, `serialNumber`, `serverGroupName`, and `uuid`.
+
 Key software inventory outputs:
 
 - `software_inventory.csv`: one row per installed software package/device instance.
